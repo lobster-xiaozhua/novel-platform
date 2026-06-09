@@ -1,0 +1,16 @@
+{
+  "name": "novel-platform",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev:web": "pnpm --filter @novel/web dev",
+    "dev:server": "pnpm --filter @novel/server dev",
+    "build": "pnpm --filter @novel/shared build && pnpm --filter @novel/web build && pnpm --filter @novel/server build",
+    "test": "pnpm -r test",
+    "lint": "pnpm -r lint"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "vitest": "^1.6.0"
+  }
+}
