@@ -1,0 +1,86 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: novel_postgres
+    environment:
+      POSTGRES_USER: novel
+      POSTGRES_PASSWORD: novel123
+      POSTGRES_DB: novel_platform
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U novel"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: novel_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  meilisearch:
+    image: getmeili/meilisearch:v1.7
+    container_name: novel_meilisearch
+    environment:
+      MEILI_MASTER_KEY: meili_master_key_change_me
+    ports:
+      - "7700:7700"
+    volumes:
+      - msdata:/meili_data
+
+  server:
+    build:
+      context: .
+      dockerfile: apps/server/Dockerfile
+    container_name: novel_server
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://novel:novel123@postgres:5432/novel_platform
+      REDIS_URL: redis://redis:6379
+      MEILI_HOST: http://meilisearch:7700
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      meilisearch:
+        condition: service_started
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    container_name: novel_web
+    environment:
+      NEXT_PUBLIC_API_URL: ""
+    depends_on:
+      - server
+
+  nginx:
+    build:
+      context: ./nginx
+      dockerfile: Dockerfile
+    container_name: novel_nginx
+    ports:
+      - "80:80"
+    depends_on:
+      - web
+      - server
+
+volumes:
+  pgdata:
+  redisdata:
+  msdata:
