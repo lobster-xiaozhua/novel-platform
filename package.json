@@ -7,7 +7,21 @@
     "dev:server": "pnpm --filter @novel/server dev",
     "build": "pnpm --filter @novel/shared build && pnpm --filter @novel/web build && pnpm --filter @novel/server build",
     "test": "pnpm -r test",
-    "lint": "pnpm -r lint"
+    "lint": "pnpm -r lint",
+    "setup": "./scripts/setup.sh",
+    "dev": "./scripts/dev.sh",
+    "build:clean": "./scripts/build.sh --clean",
+    "test:watch": "./scripts/test.sh --watch",
+    "test:coverage": "./scripts/test.sh --coverage",
+    "db:migrate": "./scripts/db.sh migrate",
+    "db:seed": "./scripts/db.sh seed",
+    "db:reset": "./scripts/db.sh reset",
+    "db:studio": "./scripts/db.sh studio",
+    "db:status": "./scripts/db.sh status",
+    "deploy": "./scripts/deploy.sh",
+    "docker:start": "./scripts/docker.sh start",
+    "docker:stop": "./scripts/docker.sh stop",
+    "docker:status": "./scripts/docker.sh status"
   },
   "devDependencies": {
     "typescript": "^5.4.0",
