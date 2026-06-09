@@ -1,0 +1,16 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "module": "CommonJS",
+    "moduleResolution": "node",
+    "declaration": true,
+    "paths": {
+      "@/*": ["./src/*"],
+      "@novel/shared": ["../../packages/shared/src"]
+    }
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "dist"]
+}
