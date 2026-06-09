@@ -1,0 +1,95 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String   @id @default(uuid()) @db.Uuid
+  username     String   @unique @db.VarChar(50)
+  email        String   @unique @db.VarChar(255)
+  passwordHash String   @map("password_hash") @db.VarChar(255)
+  avatarUrl    String?  @map("avatar_url") @db.VarChar(500)
+  role         String   @default("reader") @db.VarChar(20)
+  bio          String?
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  novels               Novel[]
+  bookshelves          Bookshelf[]
+  authorApplications   AuthorApplication[]
+  reviewedApplications AuthorApplication[] @relation("ReviewedApplications")
+
+  @@map("users")
+}
+
+model Novel {
+  id          String   @id @default(uuid()) @db.Uuid
+  authorId    String   @map("author_id") @db.Uuid
+  title       String   @db.VarChar(200)
+  coverUrl    String?  @map("cover_url") @db.VarChar(500)
+  description String?
+  category    String?  @db.VarChar(50)
+  tags        String[]
+  status      String   @default("ongoing") @db.VarChar(20)
+  wordCount   Int      @default(0) @map("word_count")
+  viewCount   Int      @default(0) @map("view_count")
+  isPublished Boolean  @default(false) @map("is_published")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  author      User          @relation(fields: [authorId], references: [id])
+  chapters    Chapter[]
+  bookshelves Bookshelf[]
+
+  @@map("novels")
+}
+
+model Chapter {
+  id          String    @id @default(uuid()) @db.Uuid
+  novelId     String    @map("novel_id") @db.Uuid
+  title       String    @db.VarChar(200)
+  content     String
+  wordCount   Int       @default(0) @map("word_count")
+  sortOrder   Int       @map("sort_order")
+  isPublished Boolean   @default(false) @map("is_published")
+  publishedAt DateTime? @map("published_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  novel Novel @relation(fields: [novelId], references: [id], onDelete: Cascade)
+
+  @@unique([novelId, sortOrder])
+  @@map("chapters")
+}
+
+model Bookshelf {
+  id            String   @id @default(uuid()) @db.Uuid
+  userId        String   @map("user_id") @db.Uuid
+  novelId       String   @map("novel_id") @db.Uuid
+  lastChapterId String?  @map("last_chapter_id") @db.Uuid
+  addedAt       DateTime @default(now()) @map("added_at")
+
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  novel Novel @relation(fields: [novelId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, novelId])
+  @@map("bookshelves")
+}
+
+model AuthorApplication {
+  id         String    @id @default(uuid()) @db.Uuid
+  userId     String    @map("user_id") @db.Uuid
+  status     String    @default("pending") @db.VarChar(20)
+  reviewedBy String?   @map("reviewed_by") @db.Uuid
+  reviewedAt DateTime? @map("reviewed_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+
+  user     User  @relation(fields: [userId], references: [id])
+  reviewer User? @relation("ReviewedApplications", fields: [reviewedBy], references: [id])
+
+  @@map("author_applications")
+}
