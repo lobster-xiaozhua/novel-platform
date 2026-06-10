@@ -1,0 +1,47 @@
+{
+  "app": {
+    "name": "墨卷",
+    "port": {
+      "web": 3000,
+      "server": 4000,
+      "nginx": 80
+    }
+  },
+  "database": {
+    "host": "localhost",
+    "port": 5432,
+    "user": "novel",
+    "password": "novel123",
+    "name": "novel_platform"
+  },
+  "redis": {
+    "host": "localhost",
+    "port": 6379,
+    "password": ""
+  },
+  "meilisearch": {
+    "host": "http://localhost:7700",
+    "masterKey": "meili_master_key_change_me"
+  },
+  "jwt": {
+    "accessSecret": "change_me_access_secret",
+    "refreshSecret": "change_me_refresh_secret",
+    "accessExpire": "15m",
+    "refreshExpire": "7d"
+  },
+  "docker": {
+    "postgresImage": "postgres:16-alpine",
+    "redisImage": "redis:7-alpine",
+    "meilisearchImage": "getmeili/meilisearch:v1.7",
+    "nginxImage": "nginx:alpine"
+  },
+  "rateLimit": {
+    "login": { "windowMs": 60000, "max": 5 },
+    "api": { "windowMs": 60000, "max": 60 },
+    "search": { "windowMs": 60000, "max": 20 }
+  },
+  "upload": {
+    "maxSize": "5mb",
+    "allowedTypes": ["jpg", "jpeg", "png", "gif", "webp"]
+  }
+}
