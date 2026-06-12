@@ -27,16 +27,6 @@ if [[ ! -f "pnpm-workspace.yaml" ]]; then
   fail "未找到 pnpm-workspace.yaml，请在项目根目录执行此脚本"
 fi
 
-# ===== Docker Compose 命令检测 =====
-detect_compose_cmd() {
-  if docker compose version &>/dev/null; then
-    echo "docker compose"
-  else
-    echo "docker-compose"
-  fi
-}
-COMPOSE_CMD="$(detect_compose_cmd)"
-
 # ===== 从 config.json 读取配置 =====
 cfg() {
   local key="$1"
@@ -94,32 +84,130 @@ check_deps() {
   fi
 
   check_command "pnpm"
-  check_command "docker"
+
+  # 检查本地服务
+  check_service "postgresql" "5432"
+  check_service "redis" "6379"
+  check_service "meilisearch" "7700"
 
   success "系统依赖检查通过"
 }
 
-# ===== Docker 管理 =====
-docker_start() {
-  step "启动 Docker 基础设施 (PostgreSQL + Redis + Meilisearch)"
-  $COMPOSE_CMD up -d postgres redis meilisearch
-  success "Docker 基础设施已启动"
+# ===== 检查本地服务 =====
+check_service() {
+  local name="$1"
+  local port="$2"
+
+  if command -v "$name" &>/dev/null || command -v "meilisearch" &>/dev/null; then
+    if lsof -i :"$port" &>/dev/null 2>&1 || ss -tlnp 2>/dev/null | grep -q ":$port "; then
+      info "$name: 运行中 (端口 $port)"
+    else
+      warn "$name: 未运行 (端口 $port)，将尝试启动..."
+      start_service "$name"
+    fi
+  else
+    warn "$name 未安装，请手动安装"
+    case "$name" in
+      postgresql)
+        echo -e "  ${CYAN}安装方式:${NC}"
+        echo -e "    Ubuntu/Debian: sudo apt install postgresql postgresql-contrib"
+        echo -e "    macOS: brew install postgresql@16"
+        ;;
+      redis)
+        echo -e "  ${CYAN}安装方式:${NC}"
+        echo -e "    Ubuntu/Debian: sudo apt install redis-server"
+        echo -e "    macOS: brew install redis"
+        ;;
+      meilisearch)
+        echo -e "  ${CYAN}安装方式:${NC}"
+        echo -e "    curl -L https://install.meilisearch.com | sh"
+        echo -e "    macOS: brew install meilisearch"
+        ;;
+    esac
+  fi
 }
 
-docker_stop() {
-  step "停止所有 Docker 服务"
-  $COMPOSE_CMD down
-  success "Docker 服务已停止"
+# ===== 启动本地服务 =====
+start_service() {
+  local name="$1"
+  case "$name" in
+    postgresql)
+      if command -v pg_ctlcluster &>/dev/null; then
+        sudo pg_ctlcluster 16 main start 2>/dev/null && info "PostgreSQL 已启动" || warn "PostgreSQL 启动失败，请手动启动"
+      elif command -v pg_ctl &>/dev/null; then
+        pg_ctl -D /usr/local/var/postgres start 2>/dev/null && info "PostgreSQL 已启动" || warn "PostgreSQL 启动失败，请手动启动"
+      fi
+      ;;
+    redis)
+      if command -v redis-server &>/dev/null; then
+        redis-server --daemonize yes 2>/dev/null && info "Redis 已启动" || warn "Redis 启动失败，请手动启动"
+      fi
+      ;;
+    meilisearch)
+      if command -v meilisearch &>/dev/null; then
+        local MEILI_KEY
+        MEILI_KEY=$(cfg "meilisearch.masterKey")
+        nohup meilisearch --master-key "$MEILI_KEY" > /tmp/meilisearch.log 2>&1 &
+        sleep 2
+        if curl -sf http://localhost:7700/health &>/dev/null; then
+          info "Meilisearch 已启动"
+        else
+          warn "Meilisearch 启动失败，请手动启动: meilisearch --master-key $MEILI_KEY"
+        fi
+      fi
+      ;;
+  esac
 }
 
-wait_for_infra() {
+# ===== 确保本地服务运行 =====
+ensure_services() {
+  step "检查本地服务状态"
+
+  local NEED_START=false
+
+  # PostgreSQL
+  if ! ss -tlnp 2>/dev/null | grep -q ":5432 " && ! lsof -i :5432 &>/dev/null 2>&1; then
+    warn "PostgreSQL 未运行，正在启动..."
+    start_service "postgresql"
+    NEED_START=true
+  else
+    info "PostgreSQL: 运行中"
+  fi
+
+  # Redis
+  if ! ss -tlnp 2>/dev/null | grep -q ":6379 " && ! lsof -i :6379 &>/dev/null 2>&1; then
+    warn "Redis 未运行，正在启动..."
+    start_service "redis"
+    NEED_START=true
+  else
+    info "Redis: 运行中"
+  fi
+
+  # Meilisearch
+  if ! curl -sf http://localhost:7700/health &>/dev/null; then
+    warn "Meilisearch 未运行，正在启动..."
+    start_service "meilisearch"
+    NEED_START=true
+  else
+    info "Meilisearch: 运行中"
+  fi
+
+  if [[ "$NEED_START" == "true" ]]; then
+    sleep 2
+  fi
+
+  success "本地服务检查完成"
+}
+
+# ===== 等待服务就绪 =====
+wait_for_services() {
   local max_retries=30
   local retry=0
 
   # PostgreSQL
   info "等待 PostgreSQL..."
   retry=0
-  while ! docker exec novel_postgres pg_isready -U novel &>/dev/null; do
+  while ! pg_isready -h localhost -p 5432 &>/dev/null; do
     retry=$((retry + 1))
     if [[ $retry -ge $max_retries ]]; then
       fail "PostgreSQL 启动超时（${max_retries}次重试后仍不可用）"
@@ -133,7 +221,7 @@ wait_for_infra() {
   # Redis
   info "等待 Redis..."
   retry=0
-  while ! docker exec novel_redis redis-cli ping &>/dev/null; do
+  while ! redis-cli ping &>/dev/null; do
     retry=$((retry + 1))
     if [[ $retry -ge 15 ]]; then
       fail "Redis 启动超时"
@@ -158,26 +246,32 @@ wait_for_infra() {
   echo ""
   info "Meilisearch 已就绪"
 
-  success "所有基础设施服务已就绪"
+  success "所有服务已就绪"
 }
 
-check_infra_running() {
-  for svc in novel_postgres novel_redis novel_meilisearch; do
-    if ! docker ps --format '{{.Names}}' | grep -q "^${svc}$"; then
-      return 1
-    fi
-  done
-  return 0
-}
+# ===== 初始化数据库 =====
+init_database() {
+  step "初始化 PostgreSQL 数据库"
 
-ensure_infra() {
-  if check_infra_running; then
-    info "基础设施已在运行"
-  else
-    warn "基础设施未运行，正在启动..."
-    docker_start
-    wait_for_infra
-  fi
+  local DB_USER DB_PASS DB_NAME
+  DB_USER=$(cfg "database.user")
+  DB_PASS=$(cfg "database.password")
+  DB_NAME=$(cfg "database.name")
+
+  # 创建用户（如果不存在）
+  sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='$DB_USER'" 2>/dev/null | grep -q 1 || \
+    sudo -u postgres psql -c "CREATE USER $DB_USER WITH PASSWORD '$DB_PASS';" 2>/dev/null && \
+    info "数据库用户 $DB_USER 已创建" || warn "数据库用户创建失败，可能已存在"
+
+  # 创建数据库（如果不存在）
+  sudo -u postgres psql -lqt 2>/dev/null | cut -d \| -f 1 | grep -qw "$DB_NAME" || \
+    sudo -u postgres psql -c "CREATE DATABASE $DB_NAME OWNER $DB_USER;" 2>/dev/null && \
+    info "数据库 $DB_NAME 已创建" || warn "数据库创建失败，可能已存在"
+
+  # 授权
+  sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE $DB_NAME TO $DB_USER;" 2>/dev/null || true
+
+  success "数据库初始化完成"
 }
 
 # ===== 数据库管理 =====
@@ -330,22 +424,28 @@ db_status() {
   step "检查数据库状态"
 
   info "PostgreSQL 连接状态:"
-  if docker exec novel_postgres pg_isready -U novel &>/dev/null; then
+  if pg_isready -h localhost -p 5432 &>/dev/null; then
     echo -e "  ${GREEN}✓${NC} PostgreSQL 可连接"
   else
     echo -e "  ${RED}✗${NC} PostgreSQL 不可连接"
   fi
 
+  info "Redis 连接状态:"
+  if redis-cli ping &>/dev/null; then
+    echo -e "  ${GREEN}✓${NC} Redis 可连接"
+  else
+    echo -e "  ${RED}✗${NC} Redis 不可连接"
+  fi
+
+  info "Meilisearch 连接状态:"
+  if curl -sf http://localhost:7700/health &>/dev/null; then
+    echo -e "  ${GREEN}✓${NC} Meilisearch 可连接"
+  else
+    echo -e "  ${RED}✗${NC} Meilisearch 不可连接"
+  fi
+
   info "迁移状态:"
   $PRISMA_CMD migrate status
-
-  info "数据统计:"
-  docker exec novel_postgres psql -U novel -d novel_platform -t -c "
-    SELECT '  用户: ' || COUNT(*) FROM users UNION ALL
-    SELECT '  小说: ' || COUNT(*) FROM novels UNION ALL
-    SELECT '  章节: ' || COUNT(*) FROM chapters UNION ALL
-    SELECT '  书架: ' || COUNT(*) FROM bookshelves;
-  " 2>/dev/null || warn "无法获取数据统计"
 }
 
 db_cmd() {
@@ -600,7 +700,7 @@ start_dev() {
     fail "未找到 .env 文件，请先运行 ./novel.sh setup"
   fi
 
-  ensure_infra
+  ensure_services
 
   PIDS=()
   cleanup() {
@@ -619,7 +719,7 @@ start_dev() {
 
   step "启动开发服务 (目标: ${TARGET})"
 
-  start_service() {
+  start_service_proc() {
     local name="$1" cmd="$2"
     info "启动 ${name}..."
     eval "$cmd" &
@@ -627,16 +727,16 @@ start_dev() {
   }
 
   case "$TARGET" in
-    web)    start_service "Web" "pnpm dev:web" ;;
-    server) start_service "Server" "pnpm dev:server" ;;
+    web)    start_service_proc "Web" "pnpm dev:web" ;;
+    server) start_service_proc "Server" "pnpm dev:server" ;;
     all)
-      start_service "Server" "pnpm dev:server"
-      start_service "Web" "pnpm dev:web"
+      start_service_proc "Server" "pnpm dev:server"
+      start_service_proc "Web" "pnpm dev:web"
       ;;
   esac
 
   local WEB_PORT; WEB_PORT=$(cfg "app.port.web")
-  local SERVER_PORT; SERVER_PORT=$(cfg "app.port.server")
+  local SERVER_PORT; SERVER_PORT=$(cfg "app.app.port.server" 2>/dev/null || cfg "app.port.server")
 
   echo ""
   success "开发服务已启动，按 Ctrl+C 停止"
@@ -649,149 +749,63 @@ start_dev() {
   done
 }
 
-# ===== 部署 =====
-deploy() {
-  local DEPLOY_ENV="production"
-  local ROLLBACK=false
+# ===== 停止服务 =====
+stop_services() {
+  step "停止开发服务"
 
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      --env)
-        DEPLOY_ENV="${2:-}"
-        [[ -z "$DEPLOY_ENV" ]] && fail "--env 需要指定环境名称"
-        shift 2
-        ;;
-      --rollback) ROLLBACK=true; shift ;;
-      *) shift ;;
-    esac
+  # 停止 Next.js 和 Express 进程
+  for pid in $(lsof -t -i :3000 2>/dev/null || true); do
+    kill "$pid" 2>/dev/null && info "已停止 Web 进程 ($pid)" || true
+  done
+  for pid in $(lsof -t -i :4000 2>/dev/null || true); do
+    kill "$pid" 2>/dev/null && info "已停止 Server 进程 ($pid)" || true
   done
 
-  if [[ "$DEPLOY_ENV" != "production" && "$DEPLOY_ENV" != "staging" ]]; then
-    fail "无效环境: $DEPLOY_ENV，仅支持 production / staging"
-  fi
-
-  if [[ "$ROLLBACK" == "true" ]]; then
-    step "回滚到上一版本"
-    PREV_IMAGES=$(docker images --filter "reference=novel-platform-*" --format "{{.Repository}}:{{.Tag}}" | head -5)
-    if [[ -z "$PREV_IMAGES" ]]; then
-      fail "未找到可回滚的镜像"
-    fi
-    echo -e "${YELLOW}可用镜像:${NC}"
-    echo "$PREV_IMAGES"
-    echo ""
-
-    local COMPOSE_FILE=""
-    [[ -f "docker-compose.${DEPLOY_ENV}.yml" ]] && COMPOSE_FILE="-f docker-compose.${DEPLOY_ENV}.yml"
-
-    $COMPOSE_CMD $COMPOSE_FILE down
-    info "已停止当前服务"
-
-    LAST_TAG=$(docker images --filter "reference=novel-platform-server" --format "{{.Tag}}" | sed -n '2p')
-    [[ -n "$LAST_TAG" ]] && info "回滚到标签: $LAST_TAG"
-
-    $COMPOSE_CMD $COMPOSE_FILE up -d
-    success "回滚完成"
-    exit 0
-  fi
-
-  DEPLOY_START=$(date +%s)
-  TIMESTAMP=$(date +%Y%m%d%H%M%S)
-
-  step "检查环境配置 (${DEPLOY_ENV})"
-  if [[ -f ".env.${DEPLOY_ENV}" ]]; then
-    info "使用 .env.${DEPLOY_ENV}"
-  elif [[ -f ".env" ]]; then
-    warn "未找到 .env.${DEPLOY_ENV}，使用 .env"
-  else
-    fail "未找到环境配置文件"
-  fi
-
-  step "构建 Docker 镜像"
-  COMPOSE_FILES="-f docker-compose.yml"
-  [[ -f "docker-compose.${DEPLOY_ENV}.yml" ]] && COMPOSE_FILES="-f docker-compose.yml -f docker-compose.${DEPLOY_ENV}.yml"
-  $COMPOSE_CMD $COMPOSE_FILES build --no-cache
-  success "Docker 镜像构建完成"
-
-  docker tag novel-platform-server:latest "novel-platform-server:${TIMESTAMP}" 2>/dev/null || true
-  docker tag novel-platform-web:latest "novel-platform-web:${TIMESTAMP}" 2>/dev/null || true
-  info "镜像已标记: ${TIMESTAMP}"
-
-  step "启动服务"
-  $COMPOSE_CMD $COMPOSE_FILES up -d
-  success "服务已启动"
-
-  step "等待健康检查"
-  wait_for_healthy() {
-    local name="$1" max_retries=30 retry=0
-    while [[ $retry -lt $max_retries ]]; do
-      local status
-      status=$(docker inspect --format='{{.State.Health.Status}}' "$name" 2>/dev/null || echo "unknown")
-      if [[ "$status" == "healthy" ]]; then
-        info "$name: healthy"
-        return 0
-      fi
-      retry=$((retry + 1))
-      echo -n "."
-      sleep 3
-    done
-    echo ""
-    warn "$name: 健康检查超时"
-    return 1
-  }
-
-  for svc in novel_postgres novel_redis; do
-    wait_for_healthy "$svc" || warn "$svc 健康检查未通过"
-  done
-
-  sleep 5
-  for svc in novel_server novel_web; do
-    if docker ps --format '{{.Names}}' | grep -q "^${svc}$"; then
-      info "$svc: $(docker inspect --format='{{.State.Status}}' "$svc" 2>/dev/null || echo 'unknown')"
-    fi
-  done
-
-  step "执行数据库迁移"
-  $COMPOSE_CMD $COMPOSE_FILES exec -T server npx prisma migrate deploy 2>/dev/null || \
-    pnpm --filter @novel/server exec prisma migrate deploy
-  success "数据库迁移完成"
-
-  step "服务状态"
-  $COMPOSE_CMD $COMPOSE_FILES ps
-
-  DEPLOY_END=$(date +%s)
-  DEPLOY_TIME=$((DEPLOY_END - DEPLOY_START))
-
-  echo ""
-  echo -e "${GREEN}${BOLD}========================================${NC}"
-  echo -e "${GREEN}${BOLD}  🚀 部署完成！环境: ${DEPLOY_ENV}  耗时: ${DEPLOY_TIME}s${NC}"
-  echo -e "${GREEN}${BOLD}========================================${NC}"
-  echo ""
+  success "开发服务已停止"
 }
 
 # ===== 服务状态 =====
 show_status() {
   step "服务状态"
 
-  if ! docker ps &>/dev/null; then
-    fail "Docker 未运行，请先启动 Docker"
+  echo ""
+
+  # PostgreSQL
+  if pg_isready -h localhost -p 5432 &>/dev/null; then
+    echo -e "  ${GREEN}✓${NC} ${BOLD}PostgreSQL${NC}  运行中  端口: 5432"
+  else
+    echo -e "  ${RED}✗${NC} ${BOLD}PostgreSQL${NC}  已停止"
+  fi
+
+  # Redis
+  if redis-cli ping &>/dev/null; then
+    echo -e "  ${GREEN}✓${NC} ${BOLD}Redis${NC}       运行中  端口: 6379"
+  else
+    echo -e "  ${RED}✗${NC} ${BOLD}Redis${NC}       已停止"
+  fi
+
+  # Meilisearch
+  if curl -sf http://localhost:7700/health &>/dev/null; then
+    echo -e "  ${GREEN}✓${NC} ${BOLD}Meilisearch${NC} 运行中  端口: 7700"
+  else
+    echo -e "  ${RED}✗${NC} ${BOLD}Meilisearch${NC} 已停止"
+  fi
+
+  # Web
+  if lsof -i :3000 &>/dev/null 2>&1; then
+    echo -e "  ${GREEN}✓${NC} ${BOLD}Web (Next.js)${NC} 运行中  端口: 3000"
+  else
+    echo -e "  ${RED}✗${NC} ${BOLD}Web (Next.js)${NC} 已停止"
+  fi
+
+  # Server
+  if lsof -i :4000 &>/dev/null 2>&1; then
+    echo -e "  ${GREEN}✓${NC} ${BOLD}Server (Express)${NC} 运行中  端口: 4000"
+  else
+    echo -e "  ${RED}✗${NC} ${BOLD}Server (Express)${NC} 已停止"
   fi
 
   echo ""
-  SERVICES=("novel_postgres" "novel_redis" "novel_meilisearch" "novel_server" "novel_web" "novel_nginx")
-
-  for svc in "${SERVICES[@]}"; do
-    if docker ps --format '{{.Names}}' | grep -q "^${svc}$"; then
-      local ports
-      ports=$(docker port "$svc" 2>/dev/null | tr '\n' ',' | sed 's/,$//' || echo "none")
-      echo -e "  ${GREEN}✓${NC} ${BOLD}${svc}${NC}  运行中  端口: ${ports}"
-    else
-      echo -e "  ${RED}✗${NC} ${BOLD}${svc}${NC}  已停止"
-    fi
-  done
-
-  echo ""
-  info "Docker Compose 详情:"
-  $COMPOSE_CMD ps 2>/dev/null || true
 }
 
 # ===== 查看日志 =====
@@ -799,19 +813,52 @@ show_logs() {
   local target="${1:-}"
   local lines="${2:-100}"
 
-  if [[ -n "$target" ]]; then
-    step "查看 ${target} 日志 (最近 ${lines} 行)"
-    $COMPOSE_CMD logs --tail="$lines" -f "$target"
-  else
-    step "查看所有日志 (最近 ${lines} 行)"
-    $COMPOSE_CMD logs --tail="$lines" -f
-  fi
+  case "$target" in
+    web|next)
+      step "查看 Web 日志 (最近 ${lines} 行)"
+      if [[ -f "apps/web/.next/trace" ]]; then
+        tail -n "$lines" apps/web/.next/trace
+      else
+        warn "无 Web 日志文件，开发模式下日志直接输出到终端"
+      fi
+      ;;
+    server|express)
+      step "查看 Server 日志 (最近 ${lines} 行)"
+      warn "开发模式下日志直接输出到终端"
+      ;;
+    postgres|postgresql)
+      step "查看 PostgreSQL 日志 (最近 ${lines} 行)"
+      sudo tail -n "$lines" /var/log/postgresql/postgresql-16-main.log 2>/dev/null || \
+        tail -n "$lines" /usr/local/var/log/postgres.log 2>/dev/null || \
+        warn "未找到 PostgreSQL 日志文件"
+      ;;
+    redis)
+      step "查看 Redis 日志 (最近 ${lines} 行)"
+      sudo tail -n "$lines" /var/log/redis/redis-server.log 2>/dev/null || \
+        tail -n "$lines" /usr/local/var/log/redis.log 2>/dev/null || \
+        warn "未找到 Redis 日志文件"
+      ;;
+    meilisearch)
+      step "查看 Meilisearch 日志 (最近 ${lines} 行)"
+      tail -n "$lines" /tmp/meilisearch.log 2>/dev/null || warn "未找到 Meilisearch 日志文件"
+      ;;
+    *)
+      step "查看所有日志提示"
+      echo -e "  ${CYAN}可用日志源:${NC}"
+      echo -e "    ./novel.sh logs web          — Web 日志"
+      echo -e "    ./novel.sh logs server       — Server 日志"
+      echo -e "    ./novel.sh logs postgres     — PostgreSQL 日志"
+      echo -e "    ./novel.sh logs redis        — Redis 日志"
+      echo -e "    ./novel.sh logs meilisearch  — Meilisearch 日志"
+      echo ""
+      warn "开发模式下 Web/Server 日志直接输出到运行终端"
+      ;;
+  esac
 }
 
 # ===== 清理 =====
 clean_all() {
-  echo -e "${RED}${BOLD}⚠️  警告：此操作将删除所有 Docker 数据和构建产物！${NC}"
-  echo -e "${YELLOW}这将清除数据库数据、Redis 缓存、Meilisearch 索引等所有持久化数据${NC}"
+  echo -e "${RED}${BOLD}⚠️  警告：此操作将删除所有构建产物！${NC}"
   echo -ne "${YELLOW}确认执行？输入 YES 继续: ${NC}"
   read -r confirm
 
@@ -821,25 +868,20 @@ clean_all() {
   fi
 
   step "清理构建产物"
-  rm -rf packages/shared/dist apps/server/dist apps/web/.next
+  rm -rf packages/shared/dist apps/server/dist apps/web/.next node_modules/.cache
   success "构建产物已清理"
 
-  step "停止并删除所有容器和卷"
-  $COMPOSE_CMD down -v --remove-orphans
-  success "容器和卷已删除"
-
-  step "清理项目相关镜像"
-  docker image prune -f 2>/dev/null || true
-  success "镜像已清理"
-
-  info "Docker 资源使用情况:"
-  docker system df 2>/dev/null || true
+  step "清理自动保存缓存"
+  rm -rf /tmp/meilisearch.log
+  success "缓存已清理"
 }
 
 # ===== 完整初始化 =====
 setup_all() {
   check_deps
   generate_env
+
+  step "安装依赖"
   pnpm install --frozen-lockfile 2>/dev/null || pnpm install
   success "依赖安装完成"
 
@@ -851,8 +893,8 @@ setup_all() {
   pnpm --filter @novel/server exec prisma generate
   success "Prisma 客户端生成完成"
 
-  docker_start
-  wait_for_infra
+  init_database
+  wait_for_services
   db_migrate
   init_meilisearch
 
@@ -872,7 +914,7 @@ setup_all() {
 smart_start() {
   if [[ -f .env && -d node_modules ]]; then
     info "检测到已有配置，一键启动..."
-    ensure_infra
+    ensure_services
     start_dev
   else
     info "首次运行，执行完整初始化..."
@@ -890,15 +932,14 @@ usage() {
   echo -e "  ${CYAN}(无参数)${NC}      智能模式：首次→完整初始化，已配置→一键启动"
   echo -e "  ${CYAN}setup${NC}         强制完整初始化"
   echo -e "  ${CYAN}start${NC}         启动开发服务 [--web|--server|--all]"
-  echo -e "  ${CYAN}stop${NC}          停止所有服务"
+  echo -e "  ${CYAN}stop${NC}          停止开发服务"
   echo -e "  ${CYAN}build${NC}         构建项目 [--clean]"
   echo -e "  ${CYAN}test${NC}          运行测试 [--unit|--e2e|--all] [--watch] [--coverage]"
-  echo -e "  ${CYAN}deploy${NC}        部署到生产 [--env production|staging] [--rollback]"
   echo -e "  ${CYAN}db${NC}            数据库管理 (migrate|seed|reset|studio|status)"
   echo -e "  ${CYAN}lint${NC}          代码检查"
   echo -e "  ${CYAN}status${NC}        查看所有服务状态"
-  echo -e "  ${CYAN}logs${NC} [svc]    查看日志 [服务名] [行数]"
-  echo -e "  ${CYAN}clean${NC}         清理构建产物和 Docker 资源（危险）"
+  echo -e "  ${CYAN}logs${NC} [svc]    查看日志 [web|server|postgres|redis|meilisearch]"
+  echo -e "  ${CYAN}clean${NC}         清理构建产物（危险）"
   echo ""
   exit 0
 }
@@ -907,10 +948,9 @@ usage() {
 case "${1:-}" in
   setup)   shift; setup_all "$@" ;;
   start)   shift; start_dev "$@" ;;
-  stop)    docker_stop ;;
+  stop)    stop_services ;;
   build)   shift; build_project "$@" ;;
   test)    shift; run_tests "$@" ;;
-  deploy)  shift; deploy "$@" ;;
   db)      shift; db_cmd "${1:-}" ;;
   lint)    run_lint ;;
   status)  show_status ;;
